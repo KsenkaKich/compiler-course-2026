@@ -11,39 +11,40 @@ namespace {
 struct Resources {
   clang::SourceLocation loc;
   std::string type;
-  
-  bool operator<(const Resources& other) const {
+
+  bool operator<(const Resources &other) const {
     if (loc.getRawEncoding() != other.loc.getRawEncoding())
       return loc.getRawEncoding() < other.loc.getRawEncoding();
     return type < other.type;
   }
 };
 
-class ResourceVisitor final : public clang::RecursiveASTVisitor<ResourceVisitor> {
+class ResourceVisitor final
+    : public clang::RecursiveASTVisitor<ResourceVisitor> {
 public:
-  explicit ResourceVisitor(clang::ASTContext *context) 
+  explicit ResourceVisitor(clang::ASTContext *context)
       : m_sourceManager(context->getSourceManager()) {}
 
   // поиск вызовов функций
   bool VisitCallExpr(clang::CallExpr *call) {
     clang::FunctionDecl *func = call->getDirectCallee();
-    if (!func) return true;
+    if (!func)
+      return true;
 
     std::string name = func->getNameInfo().getName().getAsString();
     clang::SourceLocation loc = call->getExprLoc();
-    
-    if (!m_sourceManager.isInMainFile(loc)) return true;
+
+    if (!m_sourceManager.isInMainFile(loc))
+      return true;
 
     if (name == "malloc" || name == "calloc" || name == "realloc") {
       m_resources.insert({loc, "memory"});
-    }
-    else if (name == "fopen") {
+    } else if (name == "fopen") {
       m_resources.insert({loc, "file"});
-    }
-    else if (name == "free" || name == "fclose") {
+    } else if (name == "free" || name == "fclose") {
       auto it = m_resources.begin();
       while (it != m_resources.end()) {
-        if ((name == "free" && it->type == "memory") || 
+        if ((name == "free" && it->type == "memory") ||
             (name == "fclose" && it->type == "file")) {
           it = m_resources.erase(it);
           break;
@@ -80,9 +81,11 @@ public:
   }
 
   void printResults() {
-    for (const auto& res : m_resources) {
+    for (const auto &res : m_resources) {
       if (m_sourceManager.isInMainFile(res.loc)) {
-        llvm::errs() << "warning: resource leak at line " << m_sourceManager.getSpellingLineNumber(res.loc) << " - " << res.type << "\n";
+        llvm::errs() << "warning: resource leak at line "
+                     << m_sourceManager.getSpellingLineNumber(res.loc) << " - "
+                     << res.type << "\n";
       }
     }
   }
