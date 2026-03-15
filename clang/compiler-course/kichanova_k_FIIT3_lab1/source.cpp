@@ -1,5 +1,6 @@
 #include "clang/AST/ASTConsumer.h"
 #include "clang/AST/RecursiveASTVisitor.h"
+#include "clang/Basic/Diagnostic.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/FrontendPluginRegistry.h"
 #include "llvm/Support/raw_ostream.h"
@@ -22,8 +23,15 @@ struct Resources {
 class ResourceVisitor final
     : public clang::RecursiveASTVisitor<ResourceVisitor> {
 public:
-  explicit ResourceVisitor(clang::ASTContext *context)
-      : m_sourceManager(context->getSourceManager()) {}
+  explicit ResourceVisitor(clang::ASTContext *context,
+                           clang::DiagnosticsEngine &diag)
+      : m_context(context), m_diag(diag),
+        m_sourceManager(context->getSourceManager()) {
+    m_memDiag = m_diag.getCustomDiagID(clang::DiagnosticsEngine::Warning,
+                                       "resource leak at line %0 - memory");
+    m_fileDiag = m_diag.getCustomDiagID(clang::DiagnosticsEngine::Warning,
+                                        "resource leak at line %0 - file");
+  }
 
   // поиск вызовов функций
   bool VisitCallExpr(clang::CallExpr *call) {
@@ -83,9 +91,13 @@ public:
   void printResults() {
     for (const auto &res : m_resources) {
       if (m_sourceManager.isInMainFile(res.loc)) {
-        llvm::errs() << "warning: resource leak at line "
-                     << m_sourceManager.getSpellingLineNumber(res.loc) << " - "
-                     << res.type << "\n";
+        unsigned lineNum = m_sourceManager.getSpellingLineNumber(res.loc);
+
+        if (res.type == "memory") {
+          m_diag.Report(res.loc, m_memDiag) << lineNum;
+        } else if (res.type == "file") {
+          m_diag.Report(res.loc, m_fileDiag) << lineNum;
+        }
       }
     }
   }
@@ -93,11 +105,17 @@ public:
 private:
   clang::SourceManager &m_sourceManager;
   std::multiset<Resources> m_resources;
+  clang::ASTContext *m_context;
+  clang::DiagnosticsEngine &m_diag;
+  unsigned m_memDiag;
+  unsigned m_fileDiag;
 };
 
 class ResourceConsumer final : public clang::ASTConsumer {
 public:
-  explicit ResourceConsumer(clang::ASTContext *context) : m_visitor(context) {}
+  explicit ResourceConsumer(clang::ASTContext *context,
+                            clang::DiagnosticsEngine &diag)
+      : m_visitor(context, diag) {}
 
   void HandleTranslationUnit(clang::ASTContext &context) override {
     m_visitor.TraverseDecl(context.getTranslationUnitDecl());
@@ -112,7 +130,8 @@ class ResourceAction final : public clang::PluginASTAction {
 public:
   std::unique_ptr<clang::ASTConsumer>
   CreateASTConsumer(clang::CompilerInstance &ci, llvm::StringRef) override {
-    return std::make_unique<ResourceConsumer>(&ci.getASTContext());
+    return std::make_unique<ResourceConsumer>(&ci.getASTContext(),
+                                              ci.getDiagnostics());
   }
 
   bool ParseArgs(const clang::CompilerInstance &ci,

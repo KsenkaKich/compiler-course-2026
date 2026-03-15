@@ -48,26 +48,38 @@ void if_leak(int x) {
 
 // тесты без утечек
 
+
+// CHECK-NOT: warning: resource leak at line [[#]] - memory
 void correct_malloc() {
     int* p = (int*)malloc(100);
     free(p);
 }
+
+// CHECK-NOT: warning: resource leak at line [[#]] - memory
 void correct_calloc() {
     int* p = (int*)calloc(10, sizeof(int));
     free(p);
 }
+
+// CHECK-NOT: warning: resource leak at line [[#]] - file
 void correct_fopen() {
     void* f = fopen("test.txt", "r");
     fclose(f);
 }
+
+// CHECK-NOT: warning: resource leak at line [[#]] - memory
 void correct_new1() {
     int* p = new int(42);
     delete p;
 }
+
+// CHECK-NOT: warning: resource leak at line [[#]] - memory
 void correct_new2() {
     int* p = new int[100];
     delete[] p;
 }
+
+// CHECK-NOT: warning: resource leak at line [[#]] - memory
 void correct_multiple() {
     int* a = (int*)malloc(10);
     int* b = new int(5);
@@ -76,6 +88,8 @@ void correct_multiple() {
     delete b;
     fclose(f);
 }
+
+// CHECK-NOT: warning: resource leak at line [[#]] - memory
 void correct_if(int x) {
     int* p = (int*)malloc(10);
     if (x > 0) {
@@ -84,6 +98,8 @@ void correct_if(int x) {
         free(p);
     }
 }
+
+// CHECK-NOT: warning: resource leak at line [[#]] - memory
 int* correct_return(int x) {
     int* p = new int(x);
     return p;
