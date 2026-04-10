@@ -3,7 +3,10 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
+#include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
+
+#define DEBUG_TYPE "decompose-remainder"
 
 namespace {
 
@@ -30,8 +33,9 @@ struct DecomposeRemainderPass : llvm::PassInfoMixin<DecomposeRemainderPass> {
             binOp->eraseFromParent();
             changed = true;
 
-            llvm::errs() << "decomposed frem in func: " << func.getName()
-                         << "\n";
+            LLVM_DEBUG(llvm::dbgs() << "decomposed frem in func: "
+                                    << func.getName() << "\n");
+
           } else if (opCode == llvm::Instruction::SRem) {
             auto *a = binOp->getOperand(0);
             auto *b = binOp->getOperand(1);
@@ -45,8 +49,9 @@ struct DecomposeRemainderPass : llvm::PassInfoMixin<DecomposeRemainderPass> {
             binOp->eraseFromParent();
             changed = true;
 
-            llvm::errs() << "decomposed srem in func: " << func.getName()
-                         << "\n";
+            LLVM_DEBUG(llvm::dbgs() << "decomposed srem in func: "
+                                    << func.getName() << "\n");
+
           } else if (opCode == llvm::Instruction::URem) {
             auto *a = binOp->getOperand(0);
             auto *b = binOp->getOperand(1);
@@ -60,8 +65,8 @@ struct DecomposeRemainderPass : llvm::PassInfoMixin<DecomposeRemainderPass> {
             binOp->eraseFromParent();
             changed = true;
 
-            llvm::errs() << "decomposed urem in func: " << func.getName()
-                         << "\n";
+            LLVM_DEBUG(llvm::dbgs() << "decomposed urem in func: "
+                                    << func.getName() << "\n");
           }
         }
       }
