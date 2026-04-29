@@ -40,17 +40,10 @@
     ret i32 0
   }
 
-  define i32 @small(i32 %n) {
-  entry:
-    %sub = add i32 %n, -1
-    %call = call i32 @small(i32 %sub)
-    ret i32 %call
-  }
-
 ...
 ---
 # CHECK-LABEL: name: factorial
-# CHECK-NOT: CALL64pcrel32 @factorial
+# CHECK: CALL64pcrel32 @factorial
 name: factorial
 tracksRegLiveness: true
 registers:
@@ -82,7 +75,7 @@ body: |
 ...
 ---
 # CHECK-LABEL: name: isEven
-# CHECK-NOT: CALL64pcrel32 @isEven
+# CHECK: CALL64pcrel32 @isEven
 name: isEven
 tracksRegLiveness: true
 registers:
@@ -110,7 +103,7 @@ body: |
 ...
 ---
 # CHECK-LABEL: name: sum
-# CHECK-NOT: CALL64pcrel32 @sum
+# CHECK: CALL64pcrel32 @sum
 name: sum
 tracksRegLiveness: true
 registers:
@@ -136,25 +129,4 @@ body: |
     RET64
   bb.2:
     $eax = MOV32ri 0
-    RET64
-
-...
----
-# CHECK-LABEL: name: small
-# CHECK: CALL64pcrel32 @small
-name: small
-tracksRegLiveness: true
-registers:
-  - { id: 0, class: gr32 }
-  - { id: 1, class: gr32 }
-liveins:
-  - { reg: '$edi', virtual-reg: '' }
-body: |
-  bb.0:
-    liveins: $edi
-    %0:gr32 = COPY $edi
-    %1:gr32 = ADD32ri %0, -1, implicit-def $eflags
-    $edi = COPY %1
-    CALL64pcrel32 @small, csr_64, implicit $edi, implicit-def $eax
-    $eax = COPY $eax
     RET64

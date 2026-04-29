@@ -3,6 +3,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
+#include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineModuleInfo.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/IR/Function.h"
@@ -33,6 +34,9 @@ private:
                  MachineInstr &MI);
 
   bool isInlineCandidate(MachineFunction &MF);
+
+  void remapRegisters(MachineInstr *MI, DenseMap<Register, Register> &VRegMap,
+                      MachineRegisterInfo &MRI);
 };
 
 char InlineRecursivePass::ID = 0;
@@ -48,8 +52,25 @@ bool InlineRecursivePass::isInlineCandidate(MachineFunction &MF) {
       }
     }
   }
-
   return Cnt <= MaxInlineInstrs;
+}
+
+void InlineRecursivePass::remapRegisters(MachineInstr *MI,
+                                         DenseMap<Register, Register> &VRegMap,
+                                         MachineRegisterInfo &MRI) {
+  for (MachineOperand &MO : MI->operands()) {
+    if (!MO.isReg())
+      continue;
+
+    Register R = MO.getReg();
+    if (!R.isVirtual())
+      continue;
+
+    auto It = VRegMap.find(R);
+    if (It != VRegMap.end()) {
+      MO.setReg(It->second);
+    }
+  }
 }
 
 bool InlineRecursivePass::tryInline(MachineFunction &Caller,
@@ -73,7 +94,6 @@ bool InlineRecursivePass::tryInline(MachineFunction &Caller,
     return false;
 
   MachineFunction *CalleeMF = nullptr;
-
   if (CalleeF == &Caller.getFunction()) {
     CalleeMF = &Caller;
   } else {
@@ -89,38 +109,108 @@ bool InlineRecursivePass::tryInline(MachineFunction &Caller,
   ++RecDepth[CalleeF];
 
   MachineRegisterInfo &MRI = Caller.getRegInfo();
-  MachineBasicBlock &CalleeBB = CalleeMF->front();
-
   DenseMap<Register, Register> VRegMap;
-  SmallVector<MachineInstr *, 16> ToClone;
+  DenseMap<MachineBasicBlock *, MachineBasicBlock *> BBMap;
 
-  for (auto &I : CalleeBB) {
-    if (!I.isReturn())
-      ToClone.push_back(&I);
+  auto InsertPos = MI.getIterator();
+  MachineBasicBlock *CallBlock = &MBB;
+  const TargetInstrInfo *TII = Caller.getSubtarget().getInstrInfo();
+
+  MachineBasicBlock *NextBlock = nullptr;
+  auto NextIt = std::next(InsertPos);
+  if (NextIt != CallBlock->end()) {
+    NextBlock = NextIt->getParent();
+  } else {
+    auto MBBI = std::next(CallBlock->getIterator());
+    if (MBBI != Caller.end()) {
+      NextBlock = &*MBBI;
+    }
   }
 
-  for (MachineInstr *Src : ToClone) {
-    MachineInstr *NewMI = Caller.CloneMachineInstr(Src);
+  Register ResultReg;
+  if (MI.getNumOperands() > 1 && MI.getOperand(1).isReg() &&
+      MI.getOperand(1).isDef()) {
+    ResultReg = MI.getOperand(1).getReg();
+  }
 
-    for (MachineOperand &MO : NewMI->operands()) {
-      if (!MO.isReg())
+  SmallVector<MachineBasicBlock *, 8> WorkList;
+  for (auto &BB : *CalleeMF) {
+    WorkList.push_back(&BB);
+  }
+
+  for (MachineBasicBlock *BB : WorkList) {
+    MachineBasicBlock *NewBB = Caller.CreateMachineBasicBlock();
+    Caller.insert(CallBlock->getIterator(), NewBB);
+    BBMap[BB] = NewBB;
+  }
+
+  for (MachineBasicBlock *BB : WorkList) {
+    MachineBasicBlock *NewBB = BBMap[BB];
+
+    for (auto &MI_Iter : *BB) {
+      if (MI_Iter.isPHI() || MI_Iter.isTerminator())
         continue;
 
-      Register R = MO.getReg();
-      if (!R.isVirtual())
-        continue;
-
-      auto It = VRegMap.find(R);
-      if (It == VRegMap.end()) {
-        const TargetRegisterClass *RC = MRI.getRegClass(R);
-        Register NewR = MRI.createVirtualRegister(RC);
-        It = VRegMap.insert({R, NewR}).first;
-      }
-
-      MO.setReg(It->second);
+      MachineInstr *NewMI = Caller.CloneMachineInstr(&MI_Iter);
+      remapRegisters(NewMI, VRegMap, MRI);
+      NewBB->push_back(NewMI);
     }
 
-    MBB.insert(MI.getIterator(), NewMI);
+    for (auto &MI_Iter : BB->terminators()) {
+      if (MI_Iter.isReturn()) {
+        if (NextBlock) {
+          BuildMI(NewBB, DebugLoc(), TII->get(X86::JMP_1)).addMBB(NextBlock);
+        }
+      } else {
+        MachineInstr *NewMI = Caller.CloneMachineInstr(&MI_Iter);
+        remapRegisters(NewMI, VRegMap, MRI);
+
+        for (MachineOperand &MO : NewMI->operands()) {
+          if (MO.isMBB() && BBMap.count(MO.getMBB())) {
+            MO.setMBB(BBMap[MO.getMBB()]);
+          }
+        }
+        NewBB->push_back(NewMI);
+      }
+    }
+
+    for (MachineBasicBlock *Succ : BB->successors()) {
+      MachineBasicBlock *NewSucc = BBMap[Succ];
+      for (MachineInstr &PHI : NewSucc->phis()) {
+        for (unsigned i = 2; i < PHI.getNumOperands(); i += 2) {
+          if (PHI.getOperand(i).getMBB() == BB) {
+            PHI.getOperand(i).setMBB(NewBB);
+          }
+        }
+      }
+    }
+  }
+
+  if (ResultReg.isValid()) {
+    Register RetReg = 0;
+    for (auto &BB : *CalleeMF) {
+      for (auto &MI_Iter : BB) {
+        if (MI_Iter.isReturn() && MI_Iter.getNumOperands() > 0) {
+          RetReg = MI_Iter.getOperand(0).getReg();
+          break;
+        }
+      }
+      if (RetReg != 0)
+        break;
+    }
+
+    if (RetReg != 0 && VRegMap.count(RetReg)) {
+      Register NewRetReg = VRegMap[RetReg];
+      if (NextBlock) {
+        BuildMI(*NextBlock, NextBlock->begin(), DebugLoc(),
+                TII->get(TargetOpcode::COPY), ResultReg)
+            .addReg(NewRetReg);
+      } else {
+        BuildMI(*CallBlock, InsertPos, DebugLoc(), TII->get(TargetOpcode::COPY),
+                ResultReg)
+            .addReg(NewRetReg);
+      }
+    }
   }
 
   MI.eraseFromParent();
@@ -130,7 +220,6 @@ bool InlineRecursivePass::tryInline(MachineFunction &Caller,
 }
 
 bool InlineRecursivePass::runOnMachineFunction(MachineFunction &MF) {
-
   bool Changed = false;
   bool LocalChanged = true;
 
