@@ -1,66 +1,78 @@
 # RUN: llc -mtriple x86_64-unknown-linux-gnu --load=%llvmshlibdir/kichanova_k_FIIT3_lab3_BACKEND%shlibext \
-# RUN: -run-pass=inline-recursive %s -o - | FileCheck %s
+# RUN: -run-pass=recursive-inlining %s -o - | FileCheck %s
 
 --- |
   define i32 @factorial(i32 %n) {
   entry:
     %cmp = icmp sgt i32 %n, 1
-    br i1 %cmp, label %if.then, label %if.end
-  if.then:
+    br i1 %cmp, label %rec, label %end
+  rec:
     %sub = add i32 %n, -1
     %call = call i32 @factorial(i32 %sub)
     %mul = mul i32 %call, %n
     ret i32 %mul
-  if.end:
+  end:
     ret i32 1
-  }
-
-  define i32 @isEven(i32 %n) {
-  entry:
-    %cmp = icmp eq i32 %n, 0
-    br i1 %cmp, label %if.then, label %if.else
-  if.then:
-    ret i32 1
-  if.else:
-    %sub = add i32 %n, -1
-    %call = call i32 @isEven(i32 %sub)
-    ret i32 %call
   }
 
   define i32 @sum(i32 %n) {
   entry:
     %cmp = icmp sgt i32 %n, 0
-    br i1 %cmp, label %if.then, label %if.end
-  if.then:
+    br i1 %cmp, label %rec, label %end
+  rec:
     %sub = add i32 %n, -1
     %call = call i32 @sum(i32 %sub)
     %add = add i32 %call, %n
     ret i32 %add
-  if.end:
+  end:
+    ret i32 0
+  }
+
+  define i32 @is_even(i32 %n) {
+  entry:
+    %cmp = icmp eq i32 %n, 0
+    br i1 %cmp, label %true, label %rec
+  rec:
+    %sub = add i32 %n, -1
+    %call = call i32 @is_odd(i32 %sub)
+    ret i32 %call
+  true:
+    ret i32 1
+  }
+
+  define i32 @is_odd(i32 %n) {
+  entry:
+    %cmp = icmp eq i32 %n, 0
+    br i1 %cmp, label %false, label %rec
+  rec:
+    %sub = add i32 %n, -1
+    %call = call i32 @is_even(i32 %sub)
+    ret i32 %call
+  false:
     ret i32 0
   }
 
 ...
 ---
 # CHECK-LABEL: name: factorial
-# CHECK: CALL64pcrel32 @factorial
+# CHECK-NOT: CALL64pcrel32 @factorial
+# CHECK: IMUL32rr
 name: factorial
 tracksRegLiveness: true
 registers:
   - { id: 0, class: gr32 }
   - { id: 1, class: gr32 }
   - { id: 2, class: gr32 }
-  - { id: 3, class: gr32 }
 liveins:
   - { reg: '$edi', virtual-reg: '' }
 body: |
-  bb.0:
+  bb.0.entry:
     liveins: $edi
     %0:gr32 = COPY $edi
     CMP32ri %0, 1, implicit-def $eflags
-    JCC_1 %bb.1, 15, implicit $eflags
-    JMP_1 %bb.2
-  bb.1:
+    JCC_1 %bb.2, 15, implicit $eflags
+    JMP_1 %bb.1
+  bb.1.rec:
     %1:gr32 = ADD32ri %0, -1, implicit-def $eflags
     $edi = COPY %1
     CALL64pcrel32 @factorial, csr_64, implicit $edi, implicit-def $eax
@@ -68,42 +80,15 @@ body: |
     %3:gr32 = IMUL32rr %2, %0, implicit-def $eflags
     $eax = COPY %3
     RET64
-  bb.2:
+  bb.2.end:
     $eax = MOV32ri 1
-    RET64
-
-...
----
-# CHECK-LABEL: name: isEven
-# CHECK: CALL64pcrel32 @isEven
-name: isEven
-tracksRegLiveness: true
-registers:
-  - { id: 0, class: gr32 }
-  - { id: 1, class: gr32 }
-liveins:
-  - { reg: '$edi', virtual-reg: '' }
-body: |
-  bb.0:
-    liveins: $edi
-    %0:gr32 = COPY $edi
-    CMP32ri %0, 0, implicit-def $eflags
-    JCC_1 %bb.1, 4, implicit $eflags
-    JMP_1 %bb.2
-  bb.1:
-    $eax = MOV32ri 1
-    RET64
-  bb.2:
-    %1:gr32 = ADD32ri %0, -1, implicit-def $eflags
-    $edi = COPY %1
-    CALL64pcrel32 @isEven, csr_64, implicit $edi, implicit-def $eax
-    $eax = COPY $eax
     RET64
 
 ...
 ---
 # CHECK-LABEL: name: sum
-# CHECK: CALL64pcrel32 @sum
+# CHECK-NOT: CALL64pcrel32 @sum
+# CHECK: ADD32rr
 name: sum
 tracksRegLiveness: true
 registers:
@@ -113,13 +98,13 @@ registers:
 liveins:
   - { reg: '$edi', virtual-reg: '' }
 body: |
-  bb.0:
+  bb.0.entry:
     liveins: $edi
     %0:gr32 = COPY $edi
     CMP32ri %0, 0, implicit-def $eflags
-    JCC_1 %bb.1, 15, implicit $eflags
-    JMP_1 %bb.2
-  bb.1:
+    JCC_1 %bb.2, 15, implicit $eflags
+    JMP_1 %bb.1
+  bb.1.rec:
     %1:gr32 = ADD32ri %0, -1, implicit-def $eflags
     $edi = COPY %1
     CALL64pcrel32 @sum, csr_64, implicit $edi, implicit-def $eax
@@ -127,6 +112,64 @@ body: |
     %3:gr32 = ADD32rr %2, %0, implicit-def $eflags
     $eax = COPY %3
     RET64
-  bb.2:
+  bb.2.end:
+    $eax = MOV32ri 0
+    RET64
+
+...
+---
+# CHECK-LABEL: name: is_even
+# CHECK-NOT: CALL64pcrel32 @is_odd
+name: is_even
+tracksRegLiveness: true
+registers:
+  - { id: 0, class: gr32 }
+  - { id: 1, class: gr32 }
+liveins:
+  - { reg: '$edi', virtual-reg: '' }
+body: |
+  bb.0.entry:
+    liveins: $edi
+    %0:gr32 = COPY $edi
+    CMP32ri %0, 0, implicit-def $eflags
+    JCC_1 %bb.2, 4, implicit $eflags
+    JMP_1 %bb.1
+  bb.1.rec:
+    %1:gr32 = ADD32ri %0, -1, implicit-def $eflags
+    $edi = COPY %1
+    CALL64pcrel32 @is_odd, csr_64, implicit $edi, implicit-def $eax
+    %2:gr32 = COPY $eax
+    $eax = COPY %2
+    RET64
+  bb.2.true:
+    $eax = MOV32ri 1
+    RET64
+
+...
+---
+# CHECK-LABEL: name: is_odd
+# CHECK-NOT: CALL64pcrel32 @is_even
+name: is_odd
+tracksRegLiveness: true
+registers:
+  - { id: 0, class: gr32 }
+  - { id: 1, class: gr32 }
+liveins:
+  - { reg: '$edi', virtual-reg: '' }
+body: |
+  bb.0.entry:
+    liveins: $edi
+    %0:gr32 = COPY $edi
+    CMP32ri %0, 0, implicit-def $eflags
+    JCC_1 %bb.2, 4, implicit $eflags
+    JMP_1 %bb.1
+  bb.1.rec:
+    %1:gr32 = ADD32ri %0, -1, implicit-def $eflags
+    $edi = COPY %1
+    CALL64pcrel32 @is_even, csr_64, implicit $edi, implicit-def $eax
+    %2:gr32 = COPY $eax
+    $eax = COPY %2
+    RET64
+  bb.2.false:
     $eax = MOV32ri 0
     RET64
