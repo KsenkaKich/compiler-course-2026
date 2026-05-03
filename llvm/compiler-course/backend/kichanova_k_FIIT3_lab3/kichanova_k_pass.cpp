@@ -36,10 +36,6 @@ private:
                  MachineInstr &MI, unsigned Depth,
                  DenseSet<const Function *> &Stack);
   unsigned countInstructions(MachineFunction &MF) const;
-  bool isRecursiveFunction(const Function &F,
-                           DenseSet<const Function *> &Visited,
-                           DenseSet<const Function *> &Stack);
-  bool isRecursiveFunction(const Function &F);
 };
 
 char RecursiveFunctionInliningPass::ID = 0;
@@ -52,40 +48,6 @@ RecursiveFunctionInliningPass::countInstructions(MachineFunction &MF) const {
       if (!MI.isDebugInstr() && !MI.isMetaInstruction())
         ++Cnt;
   return Cnt;
-}
-
-bool RecursiveFunctionInliningPass::isRecursiveFunction(
-    const Function &F, DenseSet<const Function *> &Visited,
-    DenseSet<const Function *> &Stack) {
-  if (Stack.count(&F))
-    return true;
-  if (Visited.count(&F))
-    return false;
-
-  Visited.insert(&F);
-  Stack.insert(&F);
-
-  for (const BasicBlock &BB : F) {
-    for (const Instruction &I : BB) {
-      if (const CallInst *callInst = dyn_cast<CallInst>(&I)) {
-        const Function *calledFunc = callInst->getCalledFunction();
-        if (calledFunc && !calledFunc->isDeclaration()) {
-          if (isRecursiveFunction(*calledFunc, Visited, Stack)) {
-            Stack.erase(&F);
-            return true;
-          }
-        }
-      }
-    }
-  }
-
-  Stack.erase(&F);
-  return false;
-}
-
-bool RecursiveFunctionInliningPass::isRecursiveFunction(const Function &F) {
-  DenseSet<const Function *> Visited, Stack;
-  return isRecursiveFunction(F, Visited, Stack);
 }
 
 void RecursiveFunctionInliningPass::buildFunctionMap(Module &M,
@@ -114,9 +76,6 @@ bool RecursiveFunctionInliningPass::tryInline(
 
   const Function *CalleeF = dyn_cast<Function>(Op.getGlobal());
   if (!CalleeF)
-    return false;
-
-  if (!isRecursiveFunction(*CalleeF))
     return false;
 
   if (Stack.count(CalleeF))
@@ -211,24 +170,12 @@ bool RecursiveFunctionInliningPass::processFunction(MachineFunction &MF) {
 bool RecursiveFunctionInliningPass::runOnModule(Module &M) {
   MachineModuleInfo &MMI = getAnalysis<MachineModuleInfoWrapperPass>().getMMI();
 
-  DenseSet<const Function *> RecursiveFuncs;
-  for (Function &F : M) {
-    if (!F.isDeclaration() && isRecursiveFunction(F)) {
-      RecursiveFuncs.insert(&F);
-    }
-  }
-
-  if (RecursiveFuncs.empty())
-    return false;
-
   buildFunctionMap(M, MMI);
 
   bool Changed = false;
 
   for (auto &KV : MFMap) {
-    if (RecursiveFuncs.count(KV.first)) {
-      Changed |= processFunction(*KV.second);
-    }
+    Changed |= processFunction(*KV.second);
   }
 
   return Changed;
