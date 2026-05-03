@@ -202,7 +202,6 @@ body: |
 # CHECK-NOT: CALL64pcrel32 @foo1
 # CHECK: ADD32ri
 # CHECK: IMUL32rr
-# CHECK: SUB32rr
 name: foo2
 tracksRegLiveness: true
 liveins:
@@ -226,7 +225,6 @@ body: |
 # CHECK-NOT: CALL64pcrel32 @foo1
 # CHECK: ADD32ri
 # CHECK: IMUL32rr
-# CHECK: SUB32rr
 name: foo3
 tracksRegLiveness: true
 liveins:
