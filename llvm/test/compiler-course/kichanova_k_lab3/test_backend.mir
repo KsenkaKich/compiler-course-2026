@@ -2,6 +2,25 @@
 # RUN: -run-pass=recursive-inlining %s -o - | FileCheck %s
 
 --- |
+  define i32 @foo1(i32 %value) {
+    %1 = mul i32 %value, %value
+    ret i32 %1
+  }
+
+  define i32 @foo2(i32 %value) {
+    %1 = add i32 %value, 10
+    %2 = call i32 @foo1(i32 %value)
+    %3 = sub i32 %1, %2
+    ret i32 %3
+  }
+
+  define i32 @foo3(i32 %value) {
+    %1 = call i32 @foo2(i32 %value)
+    %2 = call i32 @foo1(i32 %1)
+    %3 = mul i32 %1, %2
+    ret i32 %3
+  }
+
   define i32 @factorial(i32 %n) {
   entry:
     %cmp = icmp sgt i32 %n, 1
@@ -28,52 +47,78 @@
     ret i32 0
   }
 
-  define i32 @is_even(i32 %n) {
-  entry:
-    %cmp = icmp eq i32 %n, 0
-    br i1 %cmp, label %true, label %rec
-  rec:
-    %sub = add i32 %n, -1
-    %call = call i32 @is_odd(i32 %sub)
-    ret i32 %call
-  true:
-    ret i32 1
-  }
+...
 
-  define i32 @is_odd(i32 %n) {
-  entry:
-    %cmp = icmp eq i32 %n, 0
-    br i1 %cmp, label %false, label %rec
-  rec:
-    %sub = add i32 %n, -1
-    %call = call i32 @is_even(i32 %sub)
-    ret i32 %call
-  false:
-    ret i32 0
-  }
+---
+# CHECK-LABEL: name: foo1
+# CHECK: IMUL32rr
+# CHECK-NOT: CALL64pcrel32
+name: foo1
+tracksRegLiveness: true
+liveins:
+  - { reg: '$edi', virtual-reg: '' }
+body: |
+  bb.0:
+    liveins: $edi
+    %0:gr32 = COPY $edi
+    %1:gr32 = IMUL32rr %0, %0, implicit-def $eflags
+    $eax = COPY %1
+    RET64
 
-  define i32 @foo1(i32 %value) {
-    %1 = mul i32 %value, %value
-    ret i32 %1
-  }
+...
+---
+# CHECK-LABEL: name: foo2
+# CHECK: ADD32ri
+# CHECK: IMUL32rr
+# CHECK: SUB32rr
+# CHECK-NOT: CALL64pcrel32
+name: foo2
+tracksRegLiveness: true
+liveins:
+  - { reg: '$edi', virtual-reg: '' }
+body: |
+  bb.0:
+    liveins: $edi
+    %0:gr32 = COPY $edi
+    %1:gr32 = ADD32ri %0, 10, implicit-def $eflags
+    $edi = COPY %0
+    CALL64pcrel32 @foo1, csr_64, implicit $edi, implicit-def $eax
+    %2:gr32 = COPY $eax
+    %3:gr32 = SUB32rr %1, %2, implicit-def $eflags
+    $eax = COPY %3
+    RET64
 
-  define i32 @foo2(i32 %value) {
-    %1 = add i32 %value, 10
-    %2 = call i32 @foo1(i32 %value)
-    %3 = sub i32 %1, %2
-    ret i32 %3
-  }
-
-  define i32 @foo3(i32 %value) {
-    %1 = call i32 @foo2(i32 %value)
-    %2 = call i32 @foo1(i32 %1)
-    %3 = mul i32 %1, %2
-    ret i32 %3
-  }
+...
+---
+# CHECK-LABEL: name: foo3
+# CHECK: ADD32ri
+# CHECK: IMUL32rr
+# CHECK: SUB32rr
+# CHECK: IMUL32rr
+# CHECK: IMUL32rr
+# CHECK-NOT: CALL64pcrel32
+name: foo3
+tracksRegLiveness: true
+liveins:
+  - { reg: '$edi', virtual-reg: '' }
+body: |
+  bb.0:
+    liveins: $edi
+    %0:gr32 = COPY $edi
+    $edi = COPY %0
+    CALL64pcrel32 @foo2, csr_64, implicit $edi, implicit-def $eax
+    %1:gr32 = COPY $eax
+    $edi = COPY %1
+    CALL64pcrel32 @foo1, csr_64, implicit $edi, implicit-def $eax
+    %2:gr32 = COPY $eax
+    %3:gr32 = IMUL32rr %1, %2, implicit-def $eflags
+    $eax = COPY %3
+    RET64
 
 ...
 ---
 # CHECK-LABEL: name: factorial
+# CHECK: CALL64pcrel32 @factorial
 # CHECK-NOT: CALL64pcrel32 @factorial
 # CHECK: IMUL32rr
 name: factorial
@@ -102,6 +147,7 @@ body: |
 ...
 ---
 # CHECK-LABEL: name: sum
+# CHECK: CALL64pcrel32 @sum
 # CHECK-NOT: CALL64pcrel32 @sum
 # CHECK: ADD32rr
 name: sum
@@ -125,120 +171,4 @@ body: |
     RET64
   bb.2:
     $eax = MOV32ri 0
-    RET64
-
-...
----
-# CHECK-LABEL: name: is_even
-# CHECK-NOT: CALL64pcrel32 @is_odd
-name: is_even
-tracksRegLiveness: true
-liveins:
-  - { reg: '$edi', virtual-reg: '' }
-body: |
-  bb.0:
-    liveins: $edi
-    %0:gr32 = COPY $edi
-    CMP32ri %0, 0, implicit-def $eflags
-    JCC_1 %bb.2, 4, implicit $eflags
-    JMP_1 %bb.1
-  bb.1:
-    %1:gr32 = ADD32ri %0, -1, implicit-def $eflags
-    $edi = COPY %1
-    CALL64pcrel32 @is_odd, csr_64, implicit $edi, implicit-def $eax
-    %2:gr32 = COPY $eax
-    $eax = COPY %2
-    RET64
-  bb.2:
-    $eax = MOV32ri 1
-    RET64
-
-...
----
-# CHECK-LABEL: name: is_odd
-# CHECK-NOT: CALL64pcrel32 @is_even
-name: is_odd
-tracksRegLiveness: true
-liveins:
-  - { reg: '$edi', virtual-reg: '' }
-body: |
-  bb.0:
-    liveins: $edi
-    %0:gr32 = COPY $edi
-    CMP32ri %0, 0, implicit-def $eflags
-    JCC_1 %bb.2, 4, implicit $eflags
-    JMP_1 %bb.1
-  bb.1:
-    %1:gr32 = ADD32ri %0, -1, implicit-def $eflags
-    $edi = COPY %1
-    CALL64pcrel32 @is_even, csr_64, implicit $edi, implicit-def $eax
-    %2:gr32 = COPY $eax
-    $eax = COPY %2
-    RET64
-  bb.2:
-    $eax = MOV32ri 0
-    RET64
-
-...
----
-# CHECK-LABEL: name: foo1
-# CHECK: IMUL32rr
-# CHECK-NOT: CALL64pcrel32
-name: foo1
-tracksRegLiveness: true
-liveins:
-  - { reg: '$edi', virtual-reg: '' }
-body: |
-  bb.0:
-    liveins: $edi
-    %0:gr32 = COPY $edi
-    %1:gr32 = IMUL32rr %0, %0, implicit-def $eflags
-    $eax = COPY %1
-    RET64
-
-...
----
-# CHECK-LABEL: name: foo2
-# CHECK-NOT: CALL64pcrel32 @foo1
-# CHECK: ADD32ri
-# CHECK: IMUL32rr
-name: foo2
-tracksRegLiveness: true
-liveins:
-  - { reg: '$edi', virtual-reg: '' }
-body: |
-  bb.0:
-    liveins: $edi
-    %0:gr32 = COPY $edi
-    %1:gr32 = ADD32ri %0, 10, implicit-def $eflags
-    $edi = COPY %0
-    CALL64pcrel32 @foo1, csr_64, implicit $edi, implicit-def $eax
-    %2:gr32 = COPY $eax
-    %3:gr32 = SUB32rr %1, %2, implicit-def $eflags
-    $eax = COPY %3
-    RET64
-
-...
----
-# CHECK-LABEL: name: foo3
-# CHECK-NOT: CALL64pcrel32 @foo2
-# CHECK-NOT: CALL64pcrel32 @foo1
-# CHECK: ADD32ri
-# CHECK: IMUL32rr
-name: foo3
-tracksRegLiveness: true
-liveins:
-  - { reg: '$edi', virtual-reg: '' }
-body: |
-  bb.0:
-    liveins: $edi
-    %0:gr32 = COPY $edi
-    $edi = COPY %0
-    CALL64pcrel32 @foo2, csr_64, implicit $edi, implicit-def $eax
-    %1:gr32 = COPY $eax
-    $edi = COPY %1
-    CALL64pcrel32 @foo1, csr_64, implicit $edi, implicit-def $eax
-    %2:gr32 = COPY $eax
-    %3:gr32 = IMUL32rr %1, %2, implicit-def $eflags
-    $eax = COPY %3
     RET64

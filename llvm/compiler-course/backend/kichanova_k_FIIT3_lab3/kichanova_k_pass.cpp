@@ -35,18 +35,20 @@ private:
   bool tryInline(MachineFunction &Caller, MachineBasicBlock &MBB,
                  MachineInstr &MI, unsigned Depth,
                  DenseSet<const Function *> &Stack);
-  unsigned countInstructions(MachineFunction &MF) const;
+  unsigned countInstructionsToInline(MachineFunction &MF) const;
 };
 
 char RecursiveFunctionInliningPass::ID = 0;
 
-unsigned
-RecursiveFunctionInliningPass::countInstructions(MachineFunction &MF) const {
+unsigned RecursiveFunctionInliningPass::countInstructionsToInline(
+    MachineFunction &MF) const {
   unsigned Cnt = 0;
-  for (auto &BB : MF)
-    for (auto &MI : BB)
-      if (!MI.isDebugInstr() && !MI.isMetaInstruction())
+  for (auto &BB : MF) {
+    for (auto &MI : BB) {
+      if (!MI.isReturn() && !MI.isDebugInstr() && !MI.isMetaInstruction())
         ++Cnt;
+    }
+  }
   return Cnt;
 }
 
@@ -64,6 +66,7 @@ void RecursiveFunctionInliningPass::buildFunctionMap(Module &M,
 bool RecursiveFunctionInliningPass::tryInline(
     MachineFunction &Caller, MachineBasicBlock &MBB, MachineInstr &MI,
     unsigned Depth, DenseSet<const Function *> &Stack) {
+
   if (MI.getOpcode() != X86::CALL64pcrel32)
     return false;
 
@@ -78,16 +81,18 @@ bool RecursiveFunctionInliningPass::tryInline(
   if (!CalleeF)
     return false;
 
-  if (Stack.count(CalleeF))
-    return false;
-
-  MachineFunction *CalleeMF = nullptr;
-
-  if (CalleeF == &Caller.getFunction()) {
+  bool IsRecursive = (CalleeF == &Caller.getFunction());
+  if (IsRecursive) {
     if (Depth >= MAX_RECURSION_DEPTH)
       return false;
-    CalleeMF = &Caller;
     Depth++;
+  } else if (Stack.count(CalleeF)) {
+    return false;
+  }
+
+  MachineFunction *CalleeMF = nullptr;
+  if (IsRecursive) {
+    CalleeMF = &Caller;
   } else {
     auto It = MFMap.find(CalleeF);
     if (It == MFMap.end())
@@ -95,21 +100,24 @@ bool RecursiveFunctionInliningPass::tryInline(
     CalleeMF = It->second;
   }
 
-  unsigned numInstrs = countInstructions(*CalleeMF);
+  unsigned numInstrs = countInstructionsToInline(*CalleeMF);
   if (numInstrs > MAX_INLINED_INSTRUCTIONS)
     return false;
 
-  Stack.insert(CalleeF);
+  if (!IsRecursive)
+    Stack.insert(CalleeF);
 
   MachineRegisterInfo &CallerMRI = Caller.getRegInfo();
   MachineRegisterInfo &CalleeMRI = CalleeMF->getRegInfo();
 
   DenseMap<Register, Register> RegMap;
-  SmallVector<MachineInstr *, 16> ToClone;
+  SmallVector<MachineInstr *, 32> ToClone;
 
-  for (auto &I : CalleeMF->front()) {
-    if (!I.isReturn() && !I.isCall())
-      ToClone.push_back(&I);
+  for (auto &BB : *CalleeMF) {
+    for (auto &I : BB) {
+      if (!I.isReturn())
+        ToClone.push_back(&I);
+    }
   }
 
   for (MachineInstr *Src : ToClone) {
@@ -138,7 +146,9 @@ bool RecursiveFunctionInliningPass::tryInline(
   }
 
   MI.eraseFromParent();
-  Stack.erase(CalleeF);
+
+  if (!IsRecursive)
+    Stack.erase(CalleeF);
 
   return true;
 }
@@ -151,12 +161,15 @@ bool RecursiveFunctionInliningPass::processFunction(MachineFunction &MF) {
     LocalChanged = false;
 
     for (auto &MBB : MF) {
-      for (auto It = MBB.begin(); It != MBB.end();) {
-        MachineInstr &MI = *It++;
+      SmallVector<MachineInstr *, 8> CallInstrs;
+      for (auto &MI : MBB) {
+        if (MI.getOpcode() == X86::CALL64pcrel32)
+          CallInstrs.push_back(&MI);
+      }
 
+      for (MachineInstr *MI : CallInstrs) {
         DenseSet<const Function *> Stack;
-
-        if (tryInline(MF, MBB, MI, 0, Stack)) {
+        if (tryInline(MF, MBB, *MI, 0, Stack)) {
           Changed = true;
           LocalChanged = true;
         }
@@ -173,7 +186,6 @@ bool RecursiveFunctionInliningPass::runOnModule(Module &M) {
   buildFunctionMap(M, MMI);
 
   bool Changed = false;
-
   for (auto &KV : MFMap) {
     Changed |= processFunction(*KV.second);
   }
